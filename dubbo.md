@@ -1,5 +1,16 @@
 # Dubbo
 
+```xml
+<!-- 对应dubbo 2.6.2，经典版本便于分析 -->
+<dependency>
+    <groupId>com.alibaba.boot</groupId>
+    <artifactId>dubbo-spring-boot-starter</artifactId>
+    <version>0.2.0</version>
+</dependency>
+```
+
+
+
 ## 配置文件
 
 ```xml
@@ -45,250 +56,206 @@ public class DubboDemoApplication {
   - **自定义标签解析**：`spring.handlers`文件定义了XML命名空间（`namespaceUri`）与对应的`NamespaceHandler`实现类的映射关系。当Spring解析XML配置文件时，遇到**非默认命名空间的标签**（如`<dubbo:service ... />`），会通过该文件找到对应的处理器类进行解析。
   - **扩展Spring功能**：第三方框架（如MyBatis、Dubbo）通过此文件与Spring集成，无需修改Spring源码即可注入自定义Bean。
 
-
-
-### 解析
+### 文件解析
 
 ```java
-// 处理xml的handler入口
-public class DubboNamespaceHandler extends NamespaceHandlerSupport implements ConfigurableSourceBeanMetadataElement {
-    public DubboNamespaceHandler() {
-    }
-
-    public void init() {
-        // 初始化各种类型Bean的解析器Parser
-        this.registerBeanDefinitionParser("application", new DubboBeanDefinitionParser(ApplicationConfig.class));
-        this.registerBeanDefinitionParser("module", new DubboBeanDefinitionParser(ModuleConfig.class));
-        this.registerBeanDefinitionParser("registry", new DubboBeanDefinitionParser(RegistryConfig.class));
-        this.registerBeanDefinitionParser("config-center", new DubboBeanDefinitionParser(ConfigCenterBean.class));
-        this.registerBeanDefinitionParser("metadata-report", new DubboBeanDefinitionParser(MetadataReportConfig.class));
-        this.registerBeanDefinitionParser("monitor", new DubboBeanDefinitionParser(MonitorConfig.class));
-        this.registerBeanDefinitionParser("metrics", new DubboBeanDefinitionParser(MetricsConfig.class));
-        this.registerBeanDefinitionParser("tracing", new DubboBeanDefinitionParser(TracingConfig.class));
-        this.registerBeanDefinitionParser("ssl", new DubboBeanDefinitionParser(SslConfig.class));
-        this.registerBeanDefinitionParser("provider", new DubboBeanDefinitionParser(ProviderConfig.class));
-        this.registerBeanDefinitionParser("consumer", new DubboBeanDefinitionParser(ConsumerConfig.class));
-        this.registerBeanDefinitionParser("protocol", new DubboBeanDefinitionParser(ProtocolConfig.class));
-        this.registerBeanDefinitionParser("service", new DubboBeanDefinitionParser(ServiceBean.class));
-        this.registerBeanDefinitionParser("reference", new DubboBeanDefinitionParser(ReferenceBean.class));
-        this.registerBeanDefinitionParser("annotation", new AnnotationBeanDefinitionParser());
-    }
-    
-    // 遇到特定标签名时进行解析，如dubbo:service，此时会调用servive对应的解析器
-    public BeanDefinition parse(Element element, ParserContext parserContext) {
-        BeanDefinitionRegistry registry = parserContext.getRegistry();
-        this.registerAnnotationConfigProcessors(registry);
-        DubboSpringInitializer.initialize(parserContext.getRegistry());
-        BeanDefinition beanDefinition = super.parse(element, parserContext);// 调用对应解析器解析出Bean
-        this.setSource(beanDefinition);
-        return beanDefinition;
-    }
-
-    private void registerAnnotationConfigProcessors(BeanDefinitionRegistry registry) {
-        AnnotationConfigUtils.registerAnnotationConfigProcessors(registry);
-    }
+// 处理xml的handler入口，继承自NamespaceHandlerSupport，遇到特定标签名时进行解析，如dubbo:service，自动调用已经注册的Parser，执行parse()方法
+public class DubboNamespaceHandler extends NamespaceHandlerSupport {
+  ...
+  // 初始化各种类型Bean的解析器Parser
+  public void init() {
+      this.registerBeanDefinitionParser("application", new DubboBeanDefinitionParser(ApplicationConfig.class, true));
+      this.registerBeanDefinitionParser("module", new DubboBeanDefinitionParser(ModuleConfig.class, true));
+      this.registerBeanDefinitionParser("registry", new DubboBeanDefinitionParser(RegistryConfig.class, true));
+      this.registerBeanDefinitionParser("monitor", new DubboBeanDefinitionParser(MonitorConfig.class, true));
+      this.registerBeanDefinitionParser("provider", new DubboBeanDefinitionParser(ProviderConfig.class, true));
+      this.registerBeanDefinitionParser("consumer", new DubboBeanDefinitionParser(ConsumerConfig.class, true));
+      this.registerBeanDefinitionParser("protocol", new DubboBeanDefinitionParser(ProtocolConfig.class, true));
+      this.registerBeanDefinitionParser("service", new DubboBeanDefinitionParser(ServiceBean.class, true));// ServiceBean是提供服务的Bean，实现了Spring的InitializingBean接口，会在Spring容器初始化时调用afterPropertiesSet()
+      this.registerBeanDefinitionParser("reference", new DubboBeanDefinitionParser(ReferenceBean.class, false));// ReferenceBean是引用服务的Bean，实现了Spring的FactoryBean接口，通过 FactoryBean 机制动态生成代理对象，实现透明化的远程调用
+      this.registerBeanDefinitionParser("annotation", new AnnotationBeanDefinitionParser());
+  }
+  ...
 }
 ```
 
 ```java
-// 解析逻辑中，根据各个属性如“ref”进行对应解析
-private static RootBeanDefinition parse(
-            Element element, ParserContext parserContext, Class<?> beanClass, boolean registered) {
-    RootBeanDefinition beanDefinition = new RootBeanDefinition();
-    beanDefinition.setBeanClass(beanClass);
-    beanDefinition.setLazyInit(false);
-    if (ServiceBean.class.equals(beanClass)) {
-        beanDefinition.setAutowireMode(AbstractBeanDefinition.AUTOWIRE_CONSTRUCTOR);
-    }
-    // config id
-    String configId = resolveAttribute(element, "id", parserContext);
-    if (StringUtils.isNotEmpty(configId)) {
-        beanDefinition.getPropertyValues().addPropertyValue("id", configId);
-    }
 
-    String configName = "";
-    // get configName from name
-    if (StringUtils.isEmpty(configId)) {
-        configName = resolveAttribute(element, "name", parserContext);
-    }
+```
 
-    String beanName = configId;
-    if (StringUtils.isEmpty(beanName)) {
-        // generate bean name
-        String prefix = beanClass.getName();
-        int counter = 0;
-        beanName = prefix + (StringUtils.isEmpty(configName) ? "#" : ("#" + configName + "#")) + counter;
-        while (parserContext.getRegistry().containsBeanDefinition(beanName)) {
-            beanName = prefix + (StringUtils.isEmpty(configName) ? "#" : ("#" + configName + "#")) + (counter++);
-        }
-    }
-    beanDefinition.setAttribute(BEAN_NAME, beanName);
+## Bean初始化
 
-    if (ProtocolConfig.class.equals(beanClass)) {
-        //            for (String name : parserContext.getRegistry().getBeanDefinitionNames()) {
-        //                BeanDefinition definition = parserContext.getRegistry().getBeanDefinition(name);
-        //                PropertyValue property = definition.getPropertyValues().getPropertyValue("protocol");
-        //                if (property != null) {
-        //                    Object value = property.getValue();
-        //                    if (value instanceof ProtocolConfig && beanName.equals(((ProtocolConfig)
-        // value).getName())) {
-        //                        definition.getPropertyValues().addPropertyValue("protocol", new
-        // RuntimeBeanReference(beanName));
-        //                    }
-        //                }
-        //            }
-    } else if (ServiceBean.class.equals(beanClass)) {
-        String className = resolveAttribute(element, "class", parserContext);
-        if (StringUtils.isNotEmpty(className)) {
-            RootBeanDefinition classDefinition = new RootBeanDefinition();
-            classDefinition.setBeanClass(ReflectUtils.forName(className));
-            classDefinition.setLazyInit(false);
-            parseProperties(element.getChildNodes(), classDefinition, parserContext);
-            beanDefinition
-                    .getPropertyValues()
-                    .addPropertyValue("ref", new BeanDefinitionHolder(classDefinition, beanName + "Impl"));
-        }
-    }
+### 背景知识
 
-    Map<String, Class> beanPropTypeMap = beanPropsCache.get(beanClass.getName());
-    if (beanPropTypeMap == null) {
-        beanPropTypeMap = new HashMap<>();
-        beanPropsCache.put(beanClass.getName(), beanPropTypeMap);
-        if (ReferenceBean.class.equals(beanClass)) {
-            // extract bean props from ReferenceConfig
-            getPropertyMap(ReferenceConfig.class, beanPropTypeMap);
-        } else {
-            getPropertyMap(beanClass, beanPropTypeMap);
-        }
-    }
+- `InitializingBean` 是 Spring 框架提供的一个生命周期接口，用于在 Bean 的属性注入完成后执行自定义初始化逻辑。其核心作用包括
+  - **初始化回调**：定义 `afterPropertiesSet()` 方法，Spring 会在 Bean 的属性注入完成后自动调用该方法
+  - **执行顺序**：在 Spring 生命周期中，`afterPropertiesSet()` 的调用时机位于属性注入之后、`@PostConstruct` （Java标准注解）注解方法之后、自定义 `init-method` 之前
+- `DisposableBean`
+  - **作用**：在Bean销毁前执行清理逻辑
+  - **触发时机**：Spring容器关闭时，在`destroy-method`之前执行
+- `ApplicationListener<ContextRefreshedEvent>`
+  - **作用**：监听Spring上下文刷新完成事件
+  - **设计意义**：确保服务在Spring完全初始化后才暴露，避免：
+    - 依赖未就绪
+    - 配置未完全加载
+    - AOP代理未生成
 
-    ManagedMap parameters = null;
-    Set<String> processedProps = new HashSet<>();
-    for (Map.Entry<String, Class> entry : beanPropTypeMap.entrySet()) {
-        String beanProperty = entry.getKey();
-        Class type = entry.getValue();
-        String property = StringUtils.camelToSplitName(beanProperty, "-");
-        processedProps.add(property);
-        if ("parameters".equals(property)) {
-            parameters = parseParameters(element.getChildNodes(), beanDefinition, parserContext);
-        } else if ("methods".equals(property)) {
-            parseMethods(beanName, element.getChildNodes(), beanDefinition, parserContext);
-        } else if ("arguments".equals(property)) {
-            parseArguments(beanName, element.getChildNodes(), beanDefinition, parserContext);
-        } else {
-            String value = resolveAttribute(element, property, parserContext);
-            if (StringUtils.isNotBlank(value)) {
-                value = value.trim();
-                if ("registry".equals(property) && RegistryConfig.NO_AVAILABLE.equalsIgnoreCase(value)) {
-                    RegistryConfig registryConfig = new RegistryConfig();
-                    registryConfig.setAddress(RegistryConfig.NO_AVAILABLE);
-                    // see AbstractInterfaceConfig#registries, It will be invoker setRegistries method when
-                    // BeanDefinition is registered,
-                    beanDefinition.getPropertyValues().addPropertyValue("registries", registryConfig);
-                    // If registry is N/A, don't init it until the reference is invoked
-                    beanDefinition.setLazyInit(true);
-                } else if ("provider".equals(property)
-                        || "registry".equals(property)
-                        || ("protocol".equals(property)
-                                && AbstractServiceConfig.class.isAssignableFrom(beanClass))) {
-                    /**
-                     * For 'provider' 'protocol' 'registry', keep literal value (should be id/name) and set the value to 'registryIds' 'providerIds' protocolIds'
-                     * The following process should make sure each id refers to the corresponding instance, here's how to find the instance for different use cases:
-                     * 1. Spring, check existing bean by id, see{@link ServiceBean#afterPropertiesSet()}; then try to use id to find configs defined in remote Config Center
-                     * 2. API, directly use id to find configs defined in remote Config Center; if all config instances are defined locally, please use {@link org.apache.dubbo.config.ServiceConfig#setRegistries(List)}
-                     */
-                    beanDefinition.getPropertyValues().addPropertyValue(beanProperty + "Ids", value);
-                } else {
-                    Object reference;
-                    if (isPrimitive(type)) {
-                        value = getCompatibleDefaultValue(property, value);
-                        reference = value;
-                    } else if (ONRETURN.equals(property) || ONTHROW.equals(property) || ONINVOKE.equals(property)) {
-                        int index = value.lastIndexOf(".");
-                        String ref = value.substring(0, index);
-                        String method = value.substring(index + 1);
-                        reference = new RuntimeBeanReference(ref);
-                        beanDefinition.getPropertyValues().addPropertyValue(property + METHOD, method);
-                    } else if (EXECUTOR.equals(property)) {
-                        reference = new RuntimeBeanReference(value);
-                    } else {
-                        if ("ref".equals(property)
-                                && parserContext.getRegistry().containsBeanDefinition(value)) {
-                            BeanDefinition refBean =
-                                    parserContext.getRegistry().getBeanDefinition(value);
-                            if (!refBean.isSingleton()) {
-                                throw new IllegalStateException(
-                                        "The exported service ref " + value + " must be singleton! Please set the "
-                                                + value + " bean scope to singleton, eg: <bean id=\"" + value
-                                                + "\" scope=\"singleton\" ...>");
-                            }
+```java
+// 提供服务核心Bean，实现了多个接口，在Spring Bean的生命周期各个节点起作用
+ServiceBean<T> extends ServiceConfig<T> implements InitializingBean, DisposableBean, ApplicationContextAware, ApplicationListener<ContextRefreshedEvent>, BeanNameAware
+...
+
+@Override
+@SuppressWarnings({"unchecked", "deprecation"})
+public void afterPropertiesSet() throws Exception {
+  	// 给ProviderConfig赋值
+    if (getProvider() == null) {
+        Map<String, ProviderConfig> providerConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, ProviderConfig.class, false, false);
+        if (providerConfigMap != null && providerConfigMap.size() > 0) {
+            Map<String, ProtocolConfig> protocolConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, ProtocolConfig.class, false, false);
+            if ((protocolConfigMap == null || protocolConfigMap.size() == 0)
+                    && providerConfigMap.size() > 1) { // backward compatibility
+                List<ProviderConfig> providerConfigs = new ArrayList<ProviderConfig>();
+                for (ProviderConfig config : providerConfigMap.values()) {
+                    if (config.isDefault() != null && config.isDefault().booleanValue()) {
+                        providerConfigs.add(config);
+                    }
+                }
+                if (!providerConfigs.isEmpty()) {
+                    setProviders(providerConfigs);
+                }
+            } else {
+                ProviderConfig providerConfig = null;
+                for (ProviderConfig config : providerConfigMap.values()) {
+                    if (config.isDefault() == null || config.isDefault().booleanValue()) {
+                        if (providerConfig != null) {
+                            throw new IllegalStateException("Duplicate provider configs: " + providerConfig + " and " + config);
                         }
-                        reference = new RuntimeBeanReference(value);
+                        providerConfig = config;
                     }
-                    if (reference != null) {
-                        beanDefinition.getPropertyValues().addPropertyValue(beanProperty, reference);
-                    }
+                }
+                if (providerConfig != null) {
+                    setProvider(providerConfig);
                 }
             }
         }
     }
-
-    NamedNodeMap attributes = element.getAttributes();
-    int len = attributes.getLength();
-    for (int i = 0; i < len; i++) {
-        Node node = attributes.item(i);
-        String name = node.getLocalName();
-        if (!processedProps.contains(name)) {
-            if (parameters == null) {
-                parameters = new ManagedMap();
+  	// 
+    if (getApplication() == null
+            && (getProvider() == null || getProvider().getApplication() == null)) {
+        Map<String, ApplicationConfig> applicationConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, ApplicationConfig.class, false, false);
+        if (applicationConfigMap != null && applicationConfigMap.size() > 0) {
+            ApplicationConfig applicationConfig = null;
+            for (ApplicationConfig config : applicationConfigMap.values()) {
+                if (config.isDefault() == null || config.isDefault().booleanValue()) {
+                    if (applicationConfig != null) {
+                        throw new IllegalStateException("Duplicate application configs: " + applicationConfig + " and " + config);
+                    }
+                    applicationConfig = config;
+                }
             }
-            String value = node.getNodeValue();
-            parameters.put(name, new TypedStringValue(value, String.class));
+            if (applicationConfig != null) {
+                setApplication(applicationConfig);
+            }
         }
     }
-    if (parameters != null) {
-        beanDefinition.getPropertyValues().addPropertyValue("parameters", parameters);
+    if (getModule() == null
+            && (getProvider() == null || getProvider().getModule() == null)) {
+        Map<String, ModuleConfig> moduleConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, ModuleConfig.class, false, false);
+        if (moduleConfigMap != null && moduleConfigMap.size() > 0) {
+            ModuleConfig moduleConfig = null;
+            for (ModuleConfig config : moduleConfigMap.values()) {
+                if (config.isDefault() == null || config.isDefault().booleanValue()) {
+                    if (moduleConfig != null) {
+                        throw new IllegalStateException("Duplicate module configs: " + moduleConfig + " and " + config);
+                    }
+                    moduleConfig = config;
+                }
+            }
+            if (moduleConfig != null) {
+                setModule(moduleConfig);
+            }
+        }
     }
-
-    // post-process after parse attributes
-    if (ProviderConfig.class.equals(beanClass)) {
-        parseNested(
-                element, parserContext, ServiceBean.class, true, "service", "provider", beanName, beanDefinition);
-    } else if (ConsumerConfig.class.equals(beanClass)) {
-        parseNested(
-                element,
-                parserContext,
-                ReferenceBean.class,
-                true,
-                "reference",
-                "consumer",
-                beanName,
-                beanDefinition);
-    } else if (ReferenceBean.class.equals(beanClass)) {
-        configReferenceBean(element, parserContext, beanDefinition, null);
-    } else if (MetricsConfig.class.equals(beanClass)) {
-        parseMetrics(element, parserContext, beanDefinition);
+  	// 
+    if ((getRegistries() == null || getRegistries().isEmpty())
+            && (getProvider() == null || getProvider().getRegistries() == null || getProvider().getRegistries().isEmpty())
+            && (getApplication() == null || getApplication().getRegistries() == null || getApplication().getRegistries().isEmpty())) {
+        Map<String, RegistryConfig> registryConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, RegistryConfig.class, false, false);
+        if (registryConfigMap != null && registryConfigMap.size() > 0) {
+            List<RegistryConfig> registryConfigs = new ArrayList<RegistryConfig>();
+            for (RegistryConfig config : registryConfigMap.values()) {
+                if (config.isDefault() == null || config.isDefault().booleanValue()) {
+                    registryConfigs.add(config);
+                }
+            }
+            if (registryConfigs != null && !registryConfigs.isEmpty()) {
+                super.setRegistries(registryConfigs);
+            }
+        }
     }
-
-    // register bean definition
-    if (parserContext.getRegistry().containsBeanDefinition(beanName)) {
-        throw new IllegalStateException("Duplicate spring bean name: " + beanName);
+    if (getMonitor() == null
+            && (getProvider() == null || getProvider().getMonitor() == null)
+            && (getApplication() == null || getApplication().getMonitor() == null)) {
+        Map<String, MonitorConfig> monitorConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, MonitorConfig.class, false, false);
+        if (monitorConfigMap != null && monitorConfigMap.size() > 0) {
+            MonitorConfig monitorConfig = null;
+            for (MonitorConfig config : monitorConfigMap.values()) {
+                if (config.isDefault() == null || config.isDefault().booleanValue()) {
+                    if (monitorConfig != null) {
+                        throw new IllegalStateException("Duplicate monitor configs: " + monitorConfig + " and " + config);
+                    }
+                    monitorConfig = config;
+                }
+            }
+            if (monitorConfig != null) {
+                setMonitor(monitorConfig);
+            }
+        }
     }
-
-    if (registered) {
-        parserContext.getRegistry().registerBeanDefinition(beanName, beanDefinition);
+    if ((getProtocols() == null || getProtocols().isEmpty())
+            && (getProvider() == null || getProvider().getProtocols() == null || getProvider().getProtocols().isEmpty())) {
+        Map<String, ProtocolConfig> protocolConfigMap = applicationContext == null ? null : BeanFactoryUtils.beansOfTypeIncludingAncestors(applicationContext, ProtocolConfig.class, false, false);
+        if (protocolConfigMap != null && protocolConfigMap.size() > 0) {
+            List<ProtocolConfig> protocolConfigs = new ArrayList<ProtocolConfig>();
+            for (ProtocolConfig config : protocolConfigMap.values()) {
+                if (config.isDefault() == null || config.isDefault().booleanValue()) {
+                    protocolConfigs.add(config);
+                }
+            }
+            if (protocolConfigs != null && !protocolConfigs.isEmpty()) {
+                super.setProtocols(protocolConfigs);
+            }
+        }
     }
-    return beanDefinition;
+  	// 默认路径为接口全限定名
+    if (getPath() == null || getPath().length() == 0) {
+        if (beanName != null && beanName.length() > 0
+                && getInterface() != null && getInterface().length() > 0
+                && beanName.startsWith(getInterface())) {
+            setPath(beanName);
+        }
+    }
+    if (!isDelay()) {
+      	// 暴露服务
+        export();
+    }
 }
+
+@Override
+public void onApplicationEvent(ContextRefreshedEvent event) {
+    if (isDelay() && !isExported() && !isUnexported()) {
+        if (logger.isInfoEnabled()) {
+            logger.info("The service ready on spring started. service: " + getInterface());
+        }
+        export();
+    }
+}
+
+...
 ```
 
-
-
-
-
-
-
-
+## 对外暴露服务
 
 
 
